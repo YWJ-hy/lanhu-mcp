@@ -28,7 +28,21 @@ fi
 # 激活虚拟环境
 echo ""
 echo "🔧 正在激活虚拟环境..."
-source venv/bin/activate
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        ACTIVATE_SCRIPT="venv/Scripts/activate"
+        ;;
+    *)
+        ACTIVATE_SCRIPT="venv/bin/activate"
+        ;;
+esac
+
+if [ ! -f "$ACTIVATE_SCRIPT" ]; then
+    echo "❌ 错误：未找到虚拟环境激活脚本：$ACTIVATE_SCRIPT"
+    exit 1
+fi
+
+source "$ACTIVATE_SCRIPT"
 
 # 安装依赖
 echo ""
@@ -45,7 +59,7 @@ playwright install chromium
 if [ ! -f ".env" ]; then
     echo ""
     echo "⚠️  未找到配置文件 .env"
-    
+
     if [ -f "config.example.env" ]; then
         echo "📝 正在从模板创建 .env..."
         cp config.example.env .env
