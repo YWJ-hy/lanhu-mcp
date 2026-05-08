@@ -311,7 +311,7 @@ docker-compose down              # 停止
 https://lanhuapp.com/web/#/item/project/product?tid=xxx&pid=xxx&docId=xxx
 ```
 
-**2. AI 自动执行四阶段分析**
+**2. AI 自动执行四阶段分析（默认 guided 模式）**
 - ✅ STAGE 1: 全局文本扫描，建立整体认知
 - ✅ STAGE 2: 分组详细分析（根据选择的模式）
 - ✅ STAGE 3: 反向验证，确保零遗漏
@@ -321,6 +321,22 @@ https://lanhuapp.com/web/#/item/project/product?tid=xxx&pid=xxx&docId=xxx
 - 开发视角：详细需求文档 + 全局业务流程图
 - 测试视角：测试计划 + 测试用例清单 + 字段校验表
 - 快速探索：评审文档 + 模块依赖图 + 讨论要点
+
+**Adapter / 自动化 evidence-only 模式**
+
+`lanhu_get_pages` 默认只返回页面树、页面路径、层级、父子关系等事实元数据。自动化调用方如需自行完成范围判断和 PRD 输出，可调用：
+
+```yaml
+tool: lanhu_get_ai_analyze_page_result
+arguments:
+  url: https://lanhuapp.com/web/#/item/project/product?tid=xxx&pid=xxx&docId=xxx
+  page_names:
+    - 订单详情
+  mode: full
+  output_mode: evidence_only
+```
+
+`output_mode="evidence_only"` 只返回页面文本、截图路径、样式/图片资源、失败页面和错误信息，不包含分析视角、阶段工作流或强制输出格式。
 
 ### UI 设计稿查看
 
@@ -364,9 +380,9 @@ AI 会自动：
 
 | 工具名称 | 功能描述 | 使用场景 |
 |---------|---------|---------|
-| `lanhu_resolve_invite_link` | 解析邀请链接 | 用户提供分享链接时 |
-| `lanhu_get_pages` | 获取原型页面列表 | 分析需求文档前必调用 |
-| `lanhu_get_ai_analyze_page_result` | 分析原型页面内容 | 提取需求细节 |
+| `lanhu_resolve_invite_link` | 解析邀请链接并返回 docId/projectId/teamId | 用户提供分享链接时 |
+| `lanhu_get_pages` | 获取原型页面事实列表和页面树 | 分析需求文档前必调用 |
+| `lanhu_get_ai_analyze_page_result` | 分析原型页面内容，支持 `output_mode="guided"` / `"evidence_only"` | 提取需求细节或供 adapter 取证 |
 | `lanhu_get_designs` | 获取UI设计图列表 | 查看设计稿前必调用 |
 | `lanhu_get_ai_analyze_design_result` | 分析UI设计图 | 查看设计稿 |
 | `lanhu_get_design_slices` | 获取切图信息 | 下载图标、素材 |

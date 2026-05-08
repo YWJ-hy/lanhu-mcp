@@ -467,7 +467,7 @@ Please help me analyze this requirement document:
 https://lanhuapp.com/web/#/item/project/product?tid=xxx&pid=xxx&docId=xxx
 ```
 
-**2. AI Automatically Executes Four-Stage Analysis**
+**2. AI Automatically Executes Four-Stage Analysis (default guided mode)**
 - ✅ STAGE 1: Global text scan, build overall understanding
 - ✅ STAGE 2: Grouped detailed analysis (based on selected mode)
 - ✅ STAGE 3: Reverse validation, ensure zero omission
@@ -477,6 +477,22 @@ https://lanhuapp.com/web/#/item/project/product?tid=xxx&pid=xxx&docId=xxx
 - Developer Perspective: Detailed requirement doc + Global business flowchart
 - Tester Perspective: Test plan + Test case list + Field validation table
 - Quick Explorer: Review doc + Module dependency diagram + Discussion points
+
+**Adapter / automation evidence-only mode**
+
+`lanhu_get_pages` returns factual page metadata by default, including page paths, levels, parent relationships, and `pageTree`. Automation callers that perform their own scope judgment and PRD output can call:
+
+```yaml
+tool: lanhu_get_ai_analyze_page_result
+arguments:
+  url: https://lanhuapp.com/web/#/item/project/product?tid=xxx&pid=xxx&docId=xxx
+  page_names:
+    - Order Detail
+  mode: full
+  output_mode: evidence_only
+```
+
+`output_mode="evidence_only"` returns page text, screenshot paths, style/image resources, failed pages, and errors only. It does not include analysis perspectives, staged workflows, or required output formats.
 
 ### UI Design Viewing
 
@@ -518,9 +534,9 @@ Show all knowledge base messages about "testing"
 
 | Tool Name | Description | Use Case |
 |-----------|-------------|----------|
-| `lanhu_resolve_invite_link` | Parse invite link | When user provides share link |
-| `lanhu_get_pages` | Get prototype page list | Must call before analyzing requirements |
-| `lanhu_get_ai_analyze_page_result` | Analyze prototype page content | Extract requirement details |
+| `lanhu_resolve_invite_link` | Parse invite link and return docId/projectId/teamId | When user provides share link |
+| `lanhu_get_pages` | Get factual prototype page list and page tree | Must call before analyzing requirements |
+| `lanhu_get_ai_analyze_page_result` | Analyze prototype pages, supports `output_mode="guided"` / `"evidence_only"` | Extract requirement details or adapter evidence |
 | `lanhu_get_designs` | Get UI design list | Must call before viewing designs |
 | `lanhu_get_ai_analyze_design_result` | Analyze UI designs | View design drafts |
 | `lanhu_get_design_slices` | Get slice information | Download icons and assets |
