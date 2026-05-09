@@ -4416,7 +4416,7 @@ def _get_analysis_mode_prompt(analysis_mode: str) -> dict:
 @mcp.tool()
 async def lanhu_get_ai_analyze_page_result(
         url: Annotated[str, "Lanhu URL with docId parameter (indicates PRD/prototype document). Example: https://lanhuapp.com/web/#/item/project/product?tid=xxx&pid=xxx&docId=xxx. If you have an invite link, use lanhu_resolve_invite_link first!"],
-        page_names: Annotated[Union[str, List[str]], "Page name(s) to analyze. Use 'all' for all pages, single name like '退款流程', or list like ['退款流程', '用户中心']. Get exact names from lanhu_get_pages first!"],
+        page_names: Annotated[Union[str, List[str]], "要分析的页面标识。支持三种格式：'pageId:<uuid>'（精确ID匹配）、完整路径如'原型/流程/页面名'、或纯名称。用'all'选择全部页面。建议先用 lanhu_get_pages 获取准确的标识符！"],
         mode: Annotated[str, "Analysis mode: 'text_only' (fast global scan, text only for overview) or 'full' (detailed analysis with images+text). Default: 'full'"] = "full",
         analysis_mode: Annotated[str, "Analysis perspective for guided mode: 'developer', 'tester', or 'explorer'. Default: 'developer'"] = "developer",
         output_mode: Annotated[str, "Output mode: 'guided' for legacy prompts or 'evidence_only' for factual machine-readable output. Default: 'guided'"] = "guided",
@@ -4429,6 +4429,15 @@ async def lanhu_get_ai_analyze_page_result(
     DO NOT USE for: UI设计图, 设计稿, 视觉设计, 切图 (use lanhu_get_ai_analyze_design_result instead)
 
     For adapters and automation, pass output_mode="evidence_only" to return factual page evidence without workflow prompts.
+
+    PAGE SPECIFICATION — 三种 page_names 传参方式：
+    1. pageId:<uuid>（最精确）：前缀 "pageId:" 加页面UUID，如 "pageId:87e2cd9f..."
+       从 lanhu_get_pages 输出的 pageId/id 字段获取。
+    2. 完整路径（精确）：使用页面树中的完整路径，如 "原型/预估报价-流程/预估报价/手术报价"
+       从 lanhu_get_pages 输出的 path 字段获取。
+    3. 纯名称（向后兼容）：使用页面显示名称，如 "手术报价"
+       同名时取 sitemap 顺序第一个。建议优先使用 pageId 或路径消除歧义。
+    "all" 关键字选择全部页面（行为不变）。
 
     FOUR-STAGE WORKFLOW (ZERO OMISSION):
     1. STAGE 1: Call with mode="text_only" and page_names="all" for global text scan
@@ -4498,33 +4507,59 @@ async def lanhu_get_ai_analyze_page_result(
         pages_info = await extractor.get_pages_list(url)
         all_pages = pages_info['pages']
 
-        # 处理page_names参数 - 构建name到filename的映射
-        page_map = {p['name']: p['filename'].replace('.html', '') for p in all_pages}
+        # 构建三级页面匹配所需的查找字典
+        page_by_id = {p['id']: p for p in all_pages}
+        page_by_path = {p['path']: p for p in all_pages}
+        page_by_name = {}
+        for p in all_pages:
+            page_by_name.setdefault(p['name'], []).append(p)
+
+        def _resolve_page_spec(spec):
+            """三级页面匹配：pageId:前缀 > 完整路径(含/) > 纯名称(向后兼容)"""
+            spec = str(spec).strip()
+            # 第一级：pageId:<uuid> — 精确 ID 匹配
+            if spec.startswith("pageId:"):
+                return page_by_id.get(spec[len("pageId:"):])
+            # 第二级：含 '/' — 完整路径匹配
+            if '/' in spec:
+                return page_by_path.get(spec)
+            # 第三级：纯名称 — sitemap 顺序第一个匹配（向后兼容）
+            candidates = page_by_name.get(spec, [])
+            return candidates[0] if candidates else None
+
+        if isinstance(page_names, str):
+            # 尝试解析 JSON 数组字符串，如 '["邮件授权", "页面B"]'
+            try:
+                parsed = json.loads(page_names)
+                if isinstance(parsed, list):
+                    page_names = parsed
+            except (json.JSONDecodeError, TypeError):
+                pass
 
         if isinstance(page_names, str):
             if page_names.lower() == 'all':
-                target_pages = [p['filename'].replace('.html', '') for p in all_pages]
-                target_page_names = [p['name'] for p in all_pages]
+                target_page_dicts = all_pages
             else:
-                # 如果是页面显示名，转换为文件名
-                if page_names in page_map:
-                    target_pages = [page_map[page_names]]
-                    target_page_names = [page_names]
-                else:
-                    # 直接作为文件名使用
-                    target_pages = [page_names]
-                    target_page_names = [page_names]
+                page = _resolve_page_spec(page_names)
+                target_page_dicts = [page] if page else [{'name': page_names, 'filename': page_names + '.html', 'id': ''}]
         else:
-            # 列表形式
-            target_pages = []
-            target_page_names = []
+            # 列表形式 — 逐项解析，按 pageId 去重
+            target_page_dicts = []
+            seen_ids = set()
             for pn in page_names:
-                if pn in page_map:
-                    target_pages.append(page_map[pn])
-                    target_page_names.append(pn)
+                page = _resolve_page_spec(pn)
+                if page:
+                    pid = page.get('id', '')
+                    if pid and pid not in seen_ids:
+                        target_page_dicts.append(page)
+                        seen_ids.add(pid)
+                    elif not pid:
+                        target_page_dicts.append(page)
                 else:
-                    target_pages.append(pn)
-                    target_page_names.append(pn)
+                    target_page_dicts.append({'name': str(pn), 'filename': str(pn) + '.html', 'id': ''})
+
+        target_pages = [p['filename'].replace('.html', '') for p in target_page_dicts]
+        target_page_names = [p['name'] for p in target_page_dicts]
 
         # 截图（不需要返回base64了，直接保存文件）
         # 传入version_id用于智能缓存
