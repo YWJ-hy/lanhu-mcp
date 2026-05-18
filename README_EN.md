@@ -478,21 +478,35 @@ https://lanhuapp.com/web/#/item/project/product?tid=xxx&pid=xxx&docId=xxx
 - Tester Perspective: Test plan + Test case list + Field validation table
 - Quick Explorer: Review doc + Module dependency diagram + Discussion points
 
-**Adapter / automation evidence-only mode**
+**Adapter / automation scoped evidence mode**
 
-`lanhu_get_pages` returns factual page metadata by default, including page paths, levels, parent relationships, and `pageTree`. Automation callers that perform their own scope judgment and PRD output can call:
+The generic `lanhu_get_pages` and `lanhu_get_ai_analyze_page_result(output_mode="evidence_only")` tools remain available for compatibility. Adapters that need strict page scope should prefer the scoped PRD tools so sibling, parent, adjacent, or related page content never enters the model context.
+
+First fetch target-page and confirmable-child metadata only:
 
 ```yaml
-tool: lanhu_get_ai_analyze_page_result
+tool: lanhu_get_prd_page_scope
 arguments:
   url: https://lanhuapp.com/web/#/item/project/product?tid=xxx&pid=xxx&docId=xxx
-  page_names:
-    - Order Detail
+  target_page_id: <pageId from URL>
+  scope_policy: pageid_children_only
+```
+
+Then, after the user confirms child-page inclusion, fetch scoped evidence only:
+
+```yaml
+tool: lanhu_get_prd_scoped_evidence
+arguments:
+  url: https://lanhuapp.com/web/#/item/project/product?tid=xxx&pid=xxx&docId=xxx
+  target_page_id: <pageId from URL>
+  scope_policy: pageid_children_only
+  include_child_pages: false
+  confirmed_child_page_ids: []
   mode: full
   output_mode: evidence_only
 ```
 
-`output_mode="evidence_only"` returns page text, screenshot paths, style/image resources, failed pages, and errors only. It does not include analysis perspectives, staged workflows, or required output formats.
+`lanhu_get_prd_scoped_evidence` returns only target-page and user-confirmed child-page text, screenshot paths, style/image resources, failed pages, errors, and `scopeValidation`. It does not include analysis perspectives, staged workflows, required output formats, or PRD structure. The adapter should own PRD generation, role perspective, delivery boundaries, and confirmation gates.
 
 ### UI Design Viewing
 

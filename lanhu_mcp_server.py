@@ -3434,6 +3434,177 @@ def _normalize_resolve_result(
     return result
 
 
+def _page_identity(page: dict) -> Optional[str]:
+    value = page.get("id") or page.get("pageId")
+    return str(value) if value else None
+
+
+def _safe_page_summary(page: dict) -> dict:
+    page_id = _page_identity(page)
+    return {
+        "pageId": page_id,
+        "pageName": page.get("pageName") or page.get("name"),
+        "name": page.get("name") or page.get("pageName"),
+        "path": page.get("path"),
+        "level": page.get("level"),
+        "parentId": page.get("parentId"),
+        "filename": page.get("filename"),
+        "hasChildren": bool(page.get("hasChildren") or page.get("has_children")),
+    }
+
+
+def _find_target_page(pages: List[dict], target_page_id: str) -> Optional[dict]:
+    target = str(target_page_id or "").strip()
+    if not target:
+        return None
+    for page in pages:
+        if _page_identity(page) == target:
+            return page
+    return None
+
+
+def _find_descendant_pages(pages: List[dict], target_page: dict) -> List[dict]:
+    target_id = _page_identity(target_page)
+    target_path = target_page.get("path") or ""
+    target_level = target_page.get("level")
+    page_by_id = {_page_identity(page): page for page in pages if _page_identity(page)}
+
+    def has_target_ancestor(page: dict) -> bool:
+        parent_id = page.get("parentId")
+        seen = set()
+        while parent_id:
+            if parent_id == target_id:
+                return True
+            if parent_id in seen:
+                return False
+            seen.add(parent_id)
+            parent = page_by_id.get(parent_id)
+            if not parent:
+                return False
+            parent_id = parent.get("parentId")
+        return False
+
+    descendants = []
+    for page in pages:
+        page_id = _page_identity(page)
+        if not page_id or page_id == target_id:
+            continue
+        path_matches = False
+        if target_path and page.get("path"):
+            page_level = page.get("level")
+            level_matches = target_level is None or page_level is None or page_level > target_level
+            path_matches = str(page.get("path")).startswith(f"{target_path}/") and level_matches
+        if has_target_ancestor(page) or path_matches:
+            descendants.append(page)
+    return sorted(descendants, key=lambda item: item.get("index", 0))
+
+
+def _compute_scope_hash(doc_id: str, version_id: str, target_page_id: str, child_page_ids: List[str]) -> str:
+    payload = {
+        "docId": doc_id,
+        "versionId": version_id,
+        "targetPageId": target_page_id,
+        "childPageIds": sorted(child_page_ids),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
+
+
+def _resolve_pageid_children_scope(
+    pages: List[dict],
+    target_page_id: str,
+    include_child_pages: bool = False,
+    confirmed_child_page_ids: Optional[List[str]] = None,
+) -> dict:
+    confirmed_child_page_ids = [str(page_id) for page_id in (confirmed_child_page_ids or []) if str(page_id).strip()]
+    target_page = _find_target_page(pages, target_page_id)
+    if not target_page:
+        return {
+            "status": "error",
+            "targetPage": None,
+            "childPages": [],
+            "selectedPages": [],
+            "acceptedChildPageIds": [],
+            "rejectedChildPageIds": confirmed_child_page_ids,
+            "errors": [f"Target page id not found: {target_page_id}"],
+        }
+
+    child_pages = _find_descendant_pages(pages, target_page)
+    child_ids = [_page_identity(page) for page in child_pages if _page_identity(page)]
+    child_id_set = set(child_ids)
+
+    accepted_child_ids = []
+    rejected_child_ids = []
+    if include_child_pages:
+        if confirmed_child_page_ids:
+            for page_id in confirmed_child_page_ids:
+                if page_id in child_id_set:
+                    accepted_child_ids.append(page_id)
+                else:
+                    rejected_child_ids.append(page_id)
+        else:
+            accepted_child_ids = child_ids
+    else:
+        rejected_child_ids = confirmed_child_page_ids
+
+    accepted_child_set = set(accepted_child_ids)
+    selected_pages = [target_page] + [page for page in child_pages if _page_identity(page) in accepted_child_set]
+    selected_page_ids = [_page_identity(page) for page in selected_pages if _page_identity(page)]
+
+    return {
+        "status": "ok",
+        "targetPage": target_page,
+        "childPages": child_pages,
+        "selectedPages": selected_pages,
+        "selectedPageIds": selected_page_ids,
+        "acceptedChildPageIds": accepted_child_ids,
+        "rejectedChildPageIds": rejected_child_ids,
+        "errors": [],
+    }
+
+
+def _build_scope_validation(scope: dict, include_child_pages: bool, confirmed_child_page_ids: Optional[List[str]]) -> dict:
+    return {
+        "targetPageId": _page_identity(scope["targetPage"]),
+        "includeChildPages": bool(include_child_pages),
+        "requestedChildPageIds": [str(page_id) for page_id in (confirmed_child_page_ids or [])],
+        "acceptedChildPageIds": scope.get("acceptedChildPageIds", []),
+        "rejectedChildPageIds": scope.get("rejectedChildPageIds", []),
+        "returnedPageIds": scope.get("selectedPageIds", []),
+        "returnedOutOfScopePages": 0,
+        "parentExcluded": True,
+        "siblingsExcluded": True,
+        "adjacentPagesExcluded": True,
+        "relatedPagesExcluded": True,
+    }
+
+
+def _build_scoped_evidence_result(
+    evidence_result: dict,
+    scope: dict,
+    include_child_pages: bool,
+    confirmed_child_page_ids: Optional[List[str]],
+) -> dict:
+    allowed_ids = set(scope.get("selectedPageIds", []))
+    returned_ids = [page.get("pageId") for page in evidence_result.get("pages", []) if page.get("pageId")]
+    out_of_scope_count = sum(1 for page_id in returned_ids if page_id not in allowed_ids)
+    scope_validation = _build_scope_validation(scope, include_child_pages, confirmed_child_page_ids)
+    scope_validation["returnedPageIds"] = returned_ids
+    scope_validation["returnedOutOfScopePages"] = out_of_scope_count
+
+    result = dict(evidence_result)
+    result["scopePolicy"] = "pageid_children_only"
+    result["scopeValidation"] = scope_validation
+    result["warnings"] = list(result.get("warnings", []))
+    if scope.get("rejectedChildPageIds"):
+        result["warnings"].append("Some requested child page ids were rejected because they are outside the target page subtree.")
+        if result.get("status") == "ok":
+            result["status"] = "partial_error"
+    if out_of_scope_count:
+        result["status"] = "partial_error"
+        result.setdefault("errors", []).append("Scoped evidence contained out-of-scope pages.")
+    return result
+
+
 def _normalize_design_info(design_info: Optional[dict]) -> dict:
     design_info = design_info or {}
 
@@ -4117,12 +4288,12 @@ async def lanhu_get_pages(
 ) -> dict:
     """
     [PRD/Requirement Document] Get page list of Lanhu Axure prototype - CALL THIS FIRST before analyzing
-    
+
     USE THIS WHEN user says: 需求文档, 需求, PRD, 产品文档, 原型, 交互稿, Axure, 看看需求, 帮我看需求, 需求分析
     DO NOT USE for: UI设计图, 设计稿, 视觉设计, 切图 (use lanhu_get_designs instead)
-    
+
     Purpose: Get page list of PRD/requirement/prototype document. Must call this BEFORE lanhu_get_ai_analyze_page_result.
-    
+
     Returns:
         Page list and document metadata
     """
@@ -4134,9 +4305,249 @@ async def lanhu_get_pages(
         if project_id:
             store = MessageStore(project_id)
             store.record_collaborator(user_name, user_role)
-        
+
         result = await extractor.get_pages_list(url)
         return result
+    finally:
+        await extractor.close()
+
+
+@mcp.tool()
+async def lanhu_get_prd_page_scope(
+    url: Annotated[str, "Lanhu URL with docId parameter. If you have an invite link, use lanhu_resolve_invite_link first."],
+    target_page_id: Annotated[str, "Explicit pageId from the Lanhu URL. Scope is always this page plus descendant child pages only."],
+    scope_policy: Annotated[str, "Must be exactly 'pageid_children_only'."] = "pageid_children_only",
+    ctx: Context = None,
+) -> dict:
+    """
+    [Adapter PRD intake] Return target-page scope metadata only.
+
+    This tool is for adapters that need a clean scope preview before reading page content. It never returns full page trees, sibling pages, parent pages, related pages, screenshots, or guided analysis prompts.
+    """
+    if scope_policy != "pageid_children_only":
+        return {
+            "status": "error",
+            "scopePolicy": scope_policy,
+            "targetPage": None,
+            "childPages": [],
+            "needsChildConfirmation": False,
+            "errors": [f"Invalid scope_policy: {scope_policy}"],
+            "warnings": [],
+        }
+
+    extractor = LanhuExtractor()
+    try:
+        user_name, user_role = get_user_info(ctx) if ctx else ('匿名', '未知')
+        project_id = get_project_id_from_url(url)
+        if project_id:
+            store = MessageStore(project_id)
+            store.record_collaborator(user_name, user_role)
+
+        pages_info = await extractor.get_pages_list(url)
+        all_pages = pages_info.get("pages", [])
+        scope = _resolve_pageid_children_scope(all_pages, target_page_id, include_child_pages=False)
+        if scope["status"] != "ok":
+            return {
+                "status": "error",
+                "docId": pages_info.get("docId"),
+                "projectId": pages_info.get("projectId"),
+                "teamId": pages_info.get("teamId"),
+                "versionId": pages_info.get("versionId"),
+                "scopePolicy": "pageid_children_only",
+                "targetPage": None,
+                "childPages": [],
+                "needsChildConfirmation": False,
+                "defaultScope": {"includeChildPages": False, "pageIds": []},
+                "confirmableChildPageIds": [],
+                "excludedScope": {
+                    "parentExcluded": True,
+                    "siblingsExcluded": True,
+                    "adjacentPagesExcluded": True,
+                    "relatedPagesExcluded": True,
+                    "returnedOutOfScopePages": 0,
+                },
+                "errors": scope.get("errors", []),
+                "warnings": [],
+            }
+
+        target_summary = _safe_page_summary(scope["targetPage"])
+        child_summaries = [_safe_page_summary(page) for page in scope["childPages"]]
+        child_ids = [page["pageId"] for page in child_summaries if page.get("pageId")]
+        scope_hash = _compute_scope_hash(
+            pages_info.get("docId"),
+            pages_info.get("versionId"),
+            target_summary.get("pageId"),
+            child_ids,
+        )
+        return {
+            "status": "ok",
+            "docId": pages_info.get("docId"),
+            "projectId": pages_info.get("projectId"),
+            "teamId": pages_info.get("teamId"),
+            "versionId": pages_info.get("versionId"),
+            "scopePolicy": "pageid_children_only",
+            "targetPage": target_summary,
+            "childPages": child_summaries,
+            "needsChildConfirmation": bool(child_summaries),
+            "defaultScope": {"includeChildPages": False, "pageIds": [target_summary.get("pageId")]},
+            "confirmableChildPageIds": child_ids,
+            "excludedScope": {
+                "parentExcluded": True,
+                "siblingsExcluded": True,
+                "adjacentPagesExcluded": True,
+                "relatedPagesExcluded": True,
+                "returnedOutOfScopePages": 0,
+            },
+            "scopeHash": scope_hash,
+            "errors": [],
+            "warnings": [],
+        }
+    finally:
+        await extractor.close()
+
+
+@mcp.tool()
+async def lanhu_get_prd_scoped_evidence(
+    url: Annotated[str, "Lanhu URL with docId parameter. If you have an invite link, use lanhu_resolve_invite_link first."],
+    target_page_id: Annotated[str, "Explicit pageId from the Lanhu URL. Evidence is limited to this page plus confirmed descendants."],
+    scope_policy: Annotated[str, "Must be exactly 'pageid_children_only'."] = "pageid_children_only",
+    include_child_pages: Annotated[bool, "Whether the user confirmed including child pages."] = False,
+    confirmed_child_page_ids: Annotated[Optional[List[str]], "Optional confirmed descendant pageIds. Empty with include_child_pages=true means all descendants."] = None,
+    mode: Annotated[str, "Must be exactly 'full'."] = "full",
+    output_mode: Annotated[str, "Must be exactly 'evidence_only'."] = "evidence_only",
+    scope_hash: Annotated[Optional[str], "Optional scope hash returned by lanhu_get_prd_page_scope for auditability."] = None,
+    ctx: Context = None,
+) -> dict:
+    """
+    [Adapter PRD intake] Return scoped factual evidence only.
+
+    This tool never supports page_names=all, guided prompts, sibling pages, parent pages, adjacent pages, related pages, or arbitrary Lanhu analysis output.
+    """
+    errors = []
+    if scope_policy != "pageid_children_only":
+        errors.append(f"Invalid scope_policy: {scope_policy}")
+    if mode != "full":
+        errors.append(f"Invalid mode: {mode}")
+    if output_mode != "evidence_only":
+        errors.append(f"Invalid output_mode: {output_mode}")
+    if errors:
+        return {
+            "status": "error",
+            "mode": mode,
+            "outputMode": output_mode,
+            "analysisPromptIncluded": False,
+            "scopePolicy": scope_policy,
+            "scopeValidation": {
+                "targetPageId": target_page_id,
+                "includeChildPages": bool(include_child_pages),
+                "requestedChildPageIds": [str(page_id) for page_id in (confirmed_child_page_ids or [])],
+                "acceptedChildPageIds": [],
+                "rejectedChildPageIds": [],
+                "returnedPageIds": [],
+                "returnedOutOfScopePages": 0,
+                "parentExcluded": True,
+                "siblingsExcluded": True,
+                "adjacentPagesExcluded": True,
+                "relatedPagesExcluded": True,
+            },
+            "summary": {"totalRequested": 0, "successful": 0, "failed": 0, "fromCache": False},
+            "pages": [],
+            "failedPages": [],
+            "errors": errors,
+            "warnings": [],
+        }
+
+    extractor = LanhuExtractor()
+    try:
+        user_name, user_role = get_user_info(ctx) if ctx else ('匿名', '未知')
+        project_id = get_project_id_from_url(url)
+        if project_id:
+            store = MessageStore(project_id)
+            store.record_collaborator(user_name, user_role)
+
+        params = extractor.parse_url(url)
+        doc_id = params['doc_id']
+        resource_dir = str(DATA_DIR / f"axure_extract_{doc_id[:8]}")
+        output_dir = str(DATA_DIR / f"axure_extract_{doc_id[:8]}_screenshots")
+
+        download_result = await extractor.download_resources(url, resource_dir)
+        if download_result['status'] in ['downloaded', 'updated']:
+            fix_html_files(resource_dir)
+
+        pages_info = await extractor.get_pages_list(url)
+        all_pages = pages_info.get("pages", [])
+        scope = _resolve_pageid_children_scope(
+            all_pages,
+            target_page_id,
+            include_child_pages=include_child_pages,
+            confirmed_child_page_ids=confirmed_child_page_ids,
+        )
+        if scope["status"] != "ok":
+            return {
+                "status": "error",
+                "mode": "full",
+                "outputMode": "evidence_only",
+                "analysisPromptIncluded": False,
+                "scopePolicy": "pageid_children_only",
+                "scopeValidation": {
+                    "targetPageId": target_page_id,
+                    "includeChildPages": bool(include_child_pages),
+                    "requestedChildPageIds": [str(page_id) for page_id in (confirmed_child_page_ids or [])],
+                    "acceptedChildPageIds": [],
+                    "rejectedChildPageIds": scope.get("rejectedChildPageIds", []),
+                    "returnedPageIds": [],
+                    "returnedOutOfScopePages": 0,
+                    "parentExcluded": True,
+                    "siblingsExcluded": True,
+                    "adjacentPagesExcluded": True,
+                    "relatedPagesExcluded": True,
+                },
+                "summary": {"totalRequested": 0, "successful": 0, "failed": 0, "fromCache": False},
+                "pages": [],
+                "failedPages": [],
+                "errors": scope.get("errors", []),
+                "warnings": [],
+            }
+
+        selected_child_ids = scope.get("acceptedChildPageIds", [])
+        expected_scope_hash = _compute_scope_hash(
+            pages_info.get("docId"),
+            download_result.get("version_id") or pages_info.get("versionId"),
+            target_page_id,
+            [_page_identity(page) for page in scope.get("childPages", []) if _page_identity(page)],
+        )
+        warnings = []
+        if scope_hash and scope_hash != expected_scope_hash:
+            warnings.append("Provided scope_hash does not match the current Lanhu document scope.")
+
+        target_pages = [page['filename'].replace('.html', '') for page in scope["selectedPages"]]
+        version_id = download_result.get('version_id', '')
+        results = await screenshot_page_internal(resource_dir, target_pages, output_dir, return_base64=False, version_id=version_id)
+
+        filename_to_display = {page['filename'].replace('.html', ''): page['name'] for page in all_pages}
+        filename_to_page = {page['filename'].replace('.html', ''): page for page in all_pages}
+        name_to_page = {page['name']: page for page in all_pages}
+        evidence_result = _build_evidence_only_analysis_result(
+            params=params,
+            pages_info=pages_info,
+            download_result=download_result,
+            target_pages=target_pages,
+            results=results,
+            mode="full",
+            filename_to_display=filename_to_display,
+            filename_to_page=filename_to_page,
+            name_to_page=name_to_page,
+        )
+        scoped_result = _build_scoped_evidence_result(
+            evidence_result,
+            scope,
+            include_child_pages=include_child_pages,
+            confirmed_child_page_ids=confirmed_child_page_ids,
+        )
+        scoped_result["warnings"] = warnings + scoped_result.get("warnings", [])
+        scoped_result["scopeHash"] = expected_scope_hash
+        scoped_result["scopeValidation"]["selectedChildPageIds"] = selected_child_ids
+        return scoped_result
     finally:
         await extractor.close()
 

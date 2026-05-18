@@ -322,21 +322,35 @@ https://lanhuapp.com/web/#/item/project/product?tid=xxx&pid=xxx&docId=xxx
 - 测试视角：测试计划 + 测试用例清单 + 字段校验表
 - 快速探索：评审文档 + 模块依赖图 + 讨论要点
 
-**Adapter / 自动化 evidence-only 模式**
+**Adapter / 自动化 scoped evidence 模式**
 
-`lanhu_get_pages` 默认只返回页面树、页面路径、层级、父子关系等事实元数据。自动化调用方如需自行完成范围判断和 PRD 输出，可调用：
+通用工具 `lanhu_get_pages` 和 `lanhu_get_ai_analyze_page_result(output_mode="evidence_only")` 仍保留给兼容调用方。需要严格限制页面范围的 adapter 应优先使用 scoped PRD 工具，避免把目标页面之外的 sibling、parent、adjacent、related 页面内容带入模型上下文。
+
+第一步只取目标页和可确认子页 metadata：
 
 ```yaml
-tool: lanhu_get_ai_analyze_page_result
+tool: lanhu_get_prd_page_scope
 arguments:
   url: https://lanhuapp.com/web/#/item/project/product?tid=xxx&pid=xxx&docId=xxx
-  page_names:
-    - 订单详情
+  target_page_id: <pageId from URL>
+  scope_policy: pageid_children_only
+```
+
+第二步在用户确认是否包含子页后，只取 scoped evidence：
+
+```yaml
+tool: lanhu_get_prd_scoped_evidence
+arguments:
+  url: https://lanhuapp.com/web/#/item/project/product?tid=xxx&pid=xxx&docId=xxx
+  target_page_id: <pageId from URL>
+  scope_policy: pageid_children_only
+  include_child_pages: false
+  confirmed_child_page_ids: []
   mode: full
   output_mode: evidence_only
 ```
 
-`output_mode="evidence_only"` 只返回页面文本、截图路径、样式/图片资源、失败页面和错误信息，不包含分析视角、阶段工作流或强制输出格式。
+`lanhu_get_prd_scoped_evidence` 只返回目标页和用户确认子页的页面文本、截图路径、样式/图片资源、失败页面、错误信息与 `scopeValidation`，不包含分析视角、阶段工作流、强制输出格式或 PRD 结构。PRD 生成、角色视角、交付边界和确认门禁应由 adapter 自己处理。
 
 ### UI 设计稿查看
 
